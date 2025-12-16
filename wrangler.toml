@@ -1,0 +1,6 @@
+name = "dot-final-report-worker"
+main = "src/index.js"
+compatibility_date = "2025-12-16"
+
+# (These bindings are configured in the Cloudflare dashboard UI,
+# so we DON'T put bucket names or secrets here.)
