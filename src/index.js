@@ -116,33 +116,28 @@ export default {
       return new Response("Invalid JSON", { status: 400 });
     }
 
-    let {
-      scenarioId,
-      scenarioName,
-      scenario,
-      projectionLines = [],
-      subLines = [],
-      fundSources = [],
-    } = payload;
+    // Accept either:
+    // A) direct payload {scenarioId, scenarioName, scenario, projectionLines, ...}
+    // B) payload wrapped as { _payloadJson: "...." } (Make-proof)
+    if (typeof payload?._payloadJson === "string") {
+      const parsed = tryParseJson(payload._payloadJson);
+      if (parsed && typeof parsed === "object") payload = parsed;
+    }
+
+    const scenarioId = payload?.scenarioId;
+    const scenarioName = payload?.scenarioName;
 
     if (!scenarioId) return new Response("Missing scenarioId", { status: 400 });
 
-    // Normalize scenario if Make stringified it
-    if (typeof scenario === "string") {
-      const parsed = tryParseJson(scenario);
-      if (parsed && typeof parsed === "object") scenario = parsed;
-    }
-    if (!scenario || typeof scenario !== "object" || Array.isArray(scenario)) {
-      return new Response("Missing/invalid scenario object", { status: 400 });
-    }
+    // Make-proof normalization
+    const scenario = normalizeScenario(payload?.scenario);
+    const projectionLines = normalizeRows(payload?.projectionLines);
+    const subLines = normalizeRows(payload?.subLines);
+    const fundSources = normalizeRows(payload?.fundSources);
 
-    // Normalize arrays in case Make sent them as JSON strings / arrays of JSON strings
-    projectionLines = normalizeRows(projectionLines);
-    subLines = normalizeRows(subLines);
-    fundSources = normalizeRows(fundSources);
-
-    // Helpful debug (safe to leave on for now; remove later if you want)
+    // Debug signals (leave on until stable)
     console.log("scenarioId:", scenarioId);
+    console.log("scenario type:", typeof payload?.scenario, "isArray:", Array.isArray(payload?.scenario));
     console.log("projectionLines:", Array.isArray(projectionLines), projectionLines.length, "firstType:", typeof projectionLines[0]);
     console.log("subLines:", Array.isArray(subLines), subLines.length, "firstType:", typeof subLines[0]);
     console.log("fundSources:", Array.isArray(fundSources), fundSources.length, "firstType:", typeof fundSources[0]);
@@ -165,7 +160,7 @@ export default {
       workbookRelsXml,
       sheetName: "Data_Scenario",
       fields: SCENARIO_FIELDS,
-      rows: [scenario],
+      rows: [scenario], // always 1 row (blank object is OK)
     });
 
     await writeTable({
@@ -195,7 +190,7 @@ export default {
       rows: fundSources,
     });
 
-    // Re-zip (macros preserved because we never touch vbaProject.bin)
+    // Re-zip
     const outBytes = await zip.generateAsync({ type: "uint8array" });
 
     // Save output
@@ -222,44 +217,39 @@ export default {
   },
 };
 
-// ---------- Core write helper (sheet + table ref) ----------
+// ---------- Core write helper ----------
 
 async function writeTable({ zip, workbookXml, workbookRelsXml, sheetName, fields, rows }) {
   const sheetRid = findSheetRidByName(workbookXml, sheetName);
-  const sheetPath = resolveWorkbookRidToTarget(workbookRelsXml, sheetRid); // "worksheets/sheetN.xml"
+  const sheetPath = resolveWorkbookRidToTarget(workbookRelsXml, sheetRid);
   const fullSheetPath = "xl/" + sheetPath;
 
   let sheetXml = await readText(zip, fullSheetPath);
 
-  // Locate the first table relationship for this sheet -> table XML
   const sheetRelsPath = `xl/worksheets/_rels/${basename(sheetPath)}.rels`;
   const sheetRelsXml = await readText(zip, sheetRelsPath);
 
-  const tableTarget = findFirstTableTarget(sheetRelsXml); // "../tables/tableX.xml"
-  const tablePath = normalizePath("xl/worksheets", tableTarget); // "xl/tables/tableX.xml"
+  const tableTarget = findFirstTableTarget(sheetRelsXml);
+  const tablePath = normalizePath("xl/worksheets", tableTarget);
   let tableXml = await readText(zip, tablePath);
 
-  // Build matrix (rows -> values in exact field order)
   const matrix = rows.map((obj) => fields.map((f) => String(obj?.[f] ?? "")));
 
-  // Replace rows starting at row 2
   sheetXml = replaceRowsInlineStrings(sheetXml, 2, matrix);
 
-  // Update dimension + table ref based on row count
   const lastCol = colLetter(fields.length - 1);
-  const dataRows = Math.max(1, matrix.length); // keep at least 1 data row
-  const lastRow = 1 + dataRows; // header + data rows
+  const dataRows = Math.max(1, matrix.length);
+  const lastRow = 1 + dataRows;
   const ref = `A1:${lastCol}${lastRow}`;
 
   sheetXml = upsertDimension(sheetXml, ref);
   tableXml = updateTableRef(tableXml, ref);
 
-  // Save
   zip.file(fullSheetPath, sheetXml);
   zip.file(tablePath, tableXml);
 }
 
-// ---------- Normalization helpers (Make-proofing) ----------
+// ---------- Normalization (Make-proofing) ----------
 
 function tryParseJson(value) {
   if (typeof value !== "string") return null;
@@ -272,20 +262,36 @@ function tryParseJson(value) {
   }
 }
 
+function normalizeScenario(value) {
+  let v = value;
+
+  if (Array.isArray(v) && v.length === 1) v = v[0];
+
+  if (typeof v === "string") {
+    const p = tryParseJson(v);
+    if (p && typeof p === "object") v = p;
+  }
+
+  if (Array.isArray(v) && v.length === 1 && typeof v[0] === "object") v = v[0];
+
+  if (v && typeof v === "object" && !Array.isArray(v)) return v;
+
+  // Never fail hard: return blank object so we can still render lines/sublines/funds
+  return {};
+}
+
 function normalizeRows(value) {
-  // If Make sent a JSON string of an array
   const parsed = tryParseJson(value);
   if (parsed && Array.isArray(parsed)) return parsed;
 
-  // If Make sent an array:
   if (Array.isArray(value)) {
-    // Common Make case: ["[{...},{...}]"] (one string containing the whole array)
     if (value.length === 1 && typeof value[0] === "string") {
       const inner = tryParseJson(value[0]);
       if (inner && Array.isArray(inner)) return inner;
     }
-    // Or: items are strings containing JSON objects
-    return value.map((item) => tryParseJson(item) ?? item).filter((x) => x && typeof x === "object");
+    return value
+      .map((item) => tryParseJson(item) ?? item)
+      .filter((x) => x && typeof x === "object" && !Array.isArray(x));
   }
 
   return [];
@@ -350,15 +356,10 @@ function updateTableRef(tableXml, ref) {
   return tableXml;
 }
 
-/**
- * Replaces ALL rows with r >= startRow inside <sheetData> with freshly generated rows.
- * Writes values as inline strings (safe for text; formulas recalc on open per your Workbook_Open).
- */
 function replaceRowsInlineStrings(sheetXml, startRow, valuesMatrix) {
   const start = Number(startRow);
 
   sheetXml = sheetXml.replace(/<sheetData>([\s\S]*?)<\/sheetData>/i, (m, inner) => {
-    // Remove existing rows r >= start
     const cleaned = inner.replace(/<row\b[^>]*\br="(\d+)"[\s\S]*?<\/row>/gi, (rowXml, rStr) => {
       const r = Number(rStr);
       return r >= start ? "" : rowXml;
@@ -370,10 +371,8 @@ function replaceRowsInlineStrings(sheetXml, startRow, valuesMatrix) {
       return `<row r="${r}">${cells}</row>`;
     });
 
-    // Always keep at least one data row
     if (rowsXml.length === 0) {
-      const r = start;
-      rowsXml.push(`<row r="${r}"></row>`);
+      rowsXml.push(`<row r="${start}"></row>`);
     }
 
     return `<sheetData>${cleaned.trimEnd()}${rowsXml.join("")}</sheetData>`;
