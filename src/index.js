@@ -2,7 +2,7 @@ import JSZip from "jszip";
 
 const TEMPLATE_KEY = "templates/final-report-template.xlsm";
 
-// ---------- Column orders (MUST match the Excel table header order) ----------
+// ---------- Column orders (MUST match Excel table header order) ----------
 
 const SCENARIO_FIELDS = [
   "Name",
@@ -96,7 +96,7 @@ const FUNDSOURCES_FIELDS = [
   "Balance (Exp Budget)",
 ];
 
-// ---------- Main Worker ----------
+// ---------- Worker ----------
 
 export default {
   async fetch(request, env) {
@@ -116,7 +116,7 @@ export default {
       return new Response("Invalid JSON", { status: 400 });
     }
 
-    const {
+    let {
       scenarioId,
       scenarioName,
       scenario,
@@ -126,10 +126,26 @@ export default {
     } = payload;
 
     if (!scenarioId) return new Response("Missing scenarioId", { status: 400 });
-    if (!scenario || typeof scenario !== "object") return new Response("Missing scenario object", { status: 400 });
-    if (!Array.isArray(projectionLines)) return new Response("projectionLines must be an array", { status: 400 });
-    if (!Array.isArray(subLines)) return new Response("subLines must be an array", { status: 400 });
-    if (!Array.isArray(fundSources)) return new Response("fundSources must be an array", { status: 400 });
+
+    // Normalize scenario if Make stringified it
+    if (typeof scenario === "string") {
+      const parsed = tryParseJson(scenario);
+      if (parsed && typeof parsed === "object") scenario = parsed;
+    }
+    if (!scenario || typeof scenario !== "object" || Array.isArray(scenario)) {
+      return new Response("Missing/invalid scenario object", { status: 400 });
+    }
+
+    // Normalize arrays in case Make sent them as JSON strings / arrays of JSON strings
+    projectionLines = normalizeRows(projectionLines);
+    subLines = normalizeRows(subLines);
+    fundSources = normalizeRows(fundSources);
+
+    // Helpful debug (safe to leave on for now; remove later if you want)
+    console.log("scenarioId:", scenarioId);
+    console.log("projectionLines:", Array.isArray(projectionLines), projectionLines.length, "firstType:", typeof projectionLines[0]);
+    console.log("subLines:", Array.isArray(subLines), subLines.length, "firstType:", typeof subLines[0]);
+    console.log("fundSources:", Array.isArray(fundSources), fundSources.length, "firstType:", typeof fundSources[0]);
 
     // Load template
     const templateObj = await env.TEMPLATES_BUCKET.get(TEMPLATE_KEY);
@@ -209,7 +225,6 @@ export default {
 // ---------- Core write helper (sheet + table ref) ----------
 
 async function writeTable({ zip, workbookXml, workbookRelsXml, sheetName, fields, rows }) {
-  // Locate sheet XML by name
   const sheetRid = findSheetRidByName(workbookXml, sheetName);
   const sheetPath = resolveWorkbookRidToTarget(workbookRelsXml, sheetRid); // "worksheets/sheetN.xml"
   const fullSheetPath = "xl/" + sheetPath;
@@ -232,7 +247,8 @@ async function writeTable({ zip, workbookXml, workbookRelsXml, sheetName, fields
 
   // Update dimension + table ref based on row count
   const lastCol = colLetter(fields.length - 1);
-  const lastRow = 1 + Math.max(1, matrix.length); // header row + at least 1 data row
+  const dataRows = Math.max(1, matrix.length); // keep at least 1 data row
+  const lastRow = 1 + dataRows; // header + data rows
   const ref = `A1:${lastCol}${lastRow}`;
 
   sheetXml = upsertDimension(sheetXml, ref);
@@ -241,6 +257,38 @@ async function writeTable({ zip, workbookXml, workbookRelsXml, sheetName, fields
   // Save
   zip.file(fullSheetPath, sheetXml);
   zip.file(tablePath, tableXml);
+}
+
+// ---------- Normalization helpers (Make-proofing) ----------
+
+function tryParseJson(value) {
+  if (typeof value !== "string") return null;
+  const t = value.trim();
+  if (!(t.startsWith("{") || t.startsWith("["))) return null;
+  try {
+    return JSON.parse(t);
+  } catch {
+    return null;
+  }
+}
+
+function normalizeRows(value) {
+  // If Make sent a JSON string of an array
+  const parsed = tryParseJson(value);
+  if (parsed && Array.isArray(parsed)) return parsed;
+
+  // If Make sent an array:
+  if (Array.isArray(value)) {
+    // Common Make case: ["[{...},{...}]"] (one string containing the whole array)
+    if (value.length === 1 && typeof value[0] === "string") {
+      const inner = tryParseJson(value[0]);
+      if (inner && Array.isArray(inner)) return inner;
+    }
+    // Or: items are strings containing JSON objects
+    return value.map((item) => tryParseJson(item) ?? item).filter((x) => x && typeof x === "object");
+  }
+
+  return [];
 }
 
 // ---------- XML / ZIP helpers ----------
@@ -304,30 +352,28 @@ function updateTableRef(tableXml, ref) {
 
 /**
  * Replaces ALL rows with r >= startRow inside <sheetData> with freshly generated rows.
- * Writes values as inline strings (safe for text; Excel will recalc after open per your Workbook_Open).
+ * Writes values as inline strings (safe for text; formulas recalc on open per your Workbook_Open).
  */
 function replaceRowsInlineStrings(sheetXml, startRow, valuesMatrix) {
   const start = Number(startRow);
 
   sheetXml = sheetXml.replace(/<sheetData>([\s\S]*?)<\/sheetData>/i, (m, inner) => {
-    // Remove any existing <row ...> where r >= startRow
+    // Remove existing rows r >= start
     const cleaned = inner.replace(/<row\b[^>]*\br="(\d+)"[\s\S]*?<\/row>/gi, (rowXml, rStr) => {
       const r = Number(rStr);
       return r >= start ? "" : rowXml;
     });
 
-    // Build new rows
     const rowsXml = valuesMatrix.map((vals, i) => {
       const r = start + i;
       const cells = vals.map((v, idx) => makeInlineStrCell(colLetter(idx) + r, v)).join("");
       return `<row r="${r}">${cells}</row>`;
     });
 
-    // If matrix is empty, still keep ONE blank data row so the table isn't zero-length
+    // Always keep at least one data row
     if (rowsXml.length === 0) {
       const r = start;
-      const blanks = new Array(1).fill("").map(() => "").join(""); // no-op
-      rowsXml.push(`<row r="${r}">${blanks}</row>`);
+      rowsXml.push(`<row r="${r}"></row>`);
     }
 
     return `<sheetData>${cleaned.trimEnd()}${rowsXml.join("")}</sheetData>`;
