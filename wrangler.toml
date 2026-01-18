@@ -10,11 +10,11 @@ compatibility_date = "2025-12-16"
 
 [[r2_buckets]]
 binding = "TEMPLATES_BUCKET"
-bucket_name = "dot-report-templates"
+bucket_name = "dot-projection-report-templates"
 
 [[r2_buckets]]
 binding = "REPORTS_BUCKET"
-bucket_name = "dot-report-reports"
+bucket_name = "dot-projection-final-reports"
 
 # ==========================
 # NON-SECRET ENV VARS
