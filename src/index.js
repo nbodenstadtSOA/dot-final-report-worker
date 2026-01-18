@@ -46,6 +46,9 @@ const LINES_FIELDS = [
   "RSA Budget",
   "Program Code",
   "RSA Description",
+
+  // NEW (Column S)
+  "PY Actuals",
 ];
 
 const SUBLINES_FIELDS = [
@@ -121,6 +124,7 @@ const NUMERIC_FIELDS_BY_SHEET = {
     "Total Plan (Manual)",
     "Expected Expenditures (Calc)",
     "RSA Budget",
+    "PY Actuals", // NEW
   ]),
 
   "Data_Sub_Lines": new Set([
