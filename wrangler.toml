@@ -2,5 +2,24 @@ name = "dot-final-report-worker"
 main = "src/index.js"
 compatibility_date = "2025-12-16"
 
-# (These bindings are configured in the Cloudflare dashboard UI,
-# so we DON'T put bucket names or secrets here.)
+# ==========================
+# R2 BUCKET BINDINGS
+# ==========================
+# These are SAFE to commit because they only reference bucket names,
+# not credentials.
+
+[[r2_buckets]]
+binding = "TEMPLATES_BUCKET"
+bucket_name = "dot-report-templates"
+
+[[r2_buckets]]
+binding = "REPORTS_BUCKET"
+bucket_name = "dot-report-reports"
+
+# ==========================
+# NON-SECRET ENV VARS
+# ==========================
+# Public values only. Secrets should be set with `wrangler secret`.
+
+[vars]
+R2_PUBLIC_BASE = "https://pub-58bcef045ae44626814c5b198e080573.r2.dev"
